@@ -783,3 +783,20 @@ input:focus-visible,
     outline: 2px solid var(--accent);
     outline-offset: 2px;
 }
+
+/* ===== BOTÓN ELIMINAR ===== */
+.btn-delete {
+    color: var(--error);
+    border: 1px solid var(--border);
+}
+
+.btn-delete:active {
+    background: var(--error);
+    color: #fff;
+    border-color: var(--error);
+}
+
+.btn-delete:hover {
+    color: var(--error);
+    border-color: var(--error);
+}

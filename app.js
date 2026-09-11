@@ -32,7 +32,7 @@ function grabElements() {
         'themeToggle', 'settingsBtn', 'statusBar', 'statusText',
         'libraryScreen', 'mangaGrid', 'createMangaBtn',
         'mangaScreen', 'mangaFolderTitle', 'backToLibraryFromFolder',
-        'chapterFileInput', 'chapterList',
+        'chapterFileInput', 'chapterList', 'deleteMangaBtn',
         'readerScreen', 'readerTitle', 'pageInfo', 'backToFolder',
         'mangaViewport', 'mangaImage', 'navPrev', 'navNext',
         'pageSlider', 'pageThumbnails'
@@ -46,6 +46,12 @@ function bindEvents() {
     els.backToLibraryFromFolder.addEventListener('click', backToLibraryFromFolder);
     els.chapterFileInput.addEventListener('change', onChapterFileChange);
     els.backToFolder.addEventListener('click', backToMangaFolder);
+
+    // Botón eliminar manga
+    if (els.deleteMangaBtn) {
+        els.deleteMangaBtn.addEventListener('click', deleteCurrentManga);
+    }
+
     els.navPrev.addEventListener('click', () => changePage(-1));
     els.navNext.addEventListener('click', () => changePage(1));
     els.pageSlider.addEventListener('input', (e) => showPage(parseInt(e.target.value, 10)));
@@ -95,8 +101,10 @@ function hideStatus() {
 
 // ===== CLAVE DE ACCESO DE GITHUB (guardada solo en este dispositivo) =====
 function getToken() {
-    return localStorage.getItem(TOKEN_KEY) || '';
+    const token = localStorage.getItem(TOKEN_KEY);
+    return token || '';
 }
+
 function openSettings() {
     const current = getToken();
     const masked = current ? (current.slice(0, 4) + '…' + current.slice(-4)) : '(sin configurar)';
@@ -114,11 +122,14 @@ function openSettings() {
         showStatus('Clave eliminada de este dispositivo', 'success');
         return;
     }
+    // Guardar token
     localStorage.setItem(TOKEN_KEY, trimmed);
-    showStatus('Clave guardada en este dispositivo', 'success');
+    showStatus('Clave guardada en este dispositivo ✅', 'success');
 }
+
 function requireToken() {
-    if (getToken()) return true;
+    const token = getToken();
+    if (token && token.length > 10) return true;
     alert('Primero necesitas configurar tu clave de acceso de GitHub.\nToca el ícono de engranaje (⚙️) arriba a la derecha.');
     openSettings();
     return false;
@@ -199,6 +210,51 @@ async function createManga() {
     }
 }
 
+// ===== ELIMINAR MANGA (carpeta completa) — requiere clave =====
+async function deleteCurrentManga() {
+    if (!currentManga) return;
+    if (!requireToken()) return;
+
+    const confirmMsg = `¿Estás seguro de eliminar "${currentManga.name}"?\n\n` +
+        `Se eliminarán ${currentManga.chapters.length} capítulo(s) y todas las páginas.\n` +
+        `Esta acción NO se puede deshacer.\n\n` +
+        `Escribe ELIMINAR para confirmar:`;
+
+    const confirmText = prompt(confirmMsg, '');
+    if (confirmText !== 'ELIMINAR') {
+        showStatus('Eliminación cancelada', '');
+        return;
+    }
+
+    showStatus('Eliminando manga...', 'loading');
+
+    try {
+        // 1. Eliminar todas las páginas de todos los capítulos
+        for (const chapter of currentManga.chapters) {
+            for (const pagePath of chapter.pages) {
+                try {
+                    await ghDeleteFile(pagePath, `Eliminar página de "${currentManga.name}"`);
+                } catch (e) {
+                    console.warn('No se pudo eliminar página:', pagePath, e);
+                }
+            }
+        }
+
+        // 2. Eliminar del índice
+        await updateIndexOnGitHub((idx) => {
+            idx.mangas = idx.mangas.filter(m => m.id !== currentManga.id);
+        });
+
+        // 3. Volver a la biblioteca
+        backToLibraryFromFolder();
+        showStatus('Manga eliminado ✅', 'success');
+
+    } catch (e) {
+        console.error(e);
+        showStatus('Error al eliminar: ' + e.message, 'error');
+    }
+}
+
 // ===== PANTALLA: CARPETA DE UN MANGA (lista de capítulos) =====
 function openMangaFolder(mangaId) {
     currentManga = libraryIndex.mangas.find(m => m.id === mangaId);
@@ -257,14 +313,31 @@ async function importChapter(files) {
     showStatus('Preparando capítulo...', 'loading');
     try {
         let pages = [];
-        if (files.length === 1 && /\.(zip|cbz|cbr)$/i.test(files[0].name)) {
+
+        // Detectar si es un archivo comprimido
+        const isZip = files.length === 1 && /\.(zip|cbz|cbr)$/i.test(files[0].name);
+
+        if (isZip) {
+            showStatus('Extrayendo imágenes del archivo...', 'loading');
             pages = await extractZipToBlobs(files[0]);
         } else {
-            pages = files
-                .filter(f => f.type.startsWith('image/'))
-                .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
-                .map(f => ({ name: f.name, blob: f }));
+            // Filtrar solo imágenes
+            const imageFiles = files.filter(f => {
+                const isImage = f.type.startsWith('image/') || 
+                               /\.(jpg|jpeg|png|webp|gif|bmp)$/i.test(f.name);
+                return isImage;
+            });
+
+            if (imageFiles.length === 0) {
+                showStatus('No se encontraron imágenes. Selecciona archivos .jpg, .png, .webp, .cbz o .zip', 'error');
+                return;
+            }
+
+            // Ordenar naturalmente
+            imageFiles.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+            pages = imageFiles.map(f => ({ name: f.name, blob: f }));
         }
+
         if (!pages.length) {
             showStatus('No se encontraron imágenes en lo seleccionado', 'error');
             return;
@@ -295,7 +368,7 @@ async function importChapter(files) {
         });
         currentManga = libraryIndex.mangas.find(m => m.id === currentManga.id);
         renderChapterList();
-        showStatus('Capítulo agregado ✅ (puede tardar un minuto en verse en tus otros dispositivos)', 'success');
+        showStatus(`Capítulo "${chapterName}" agregado ✅ (${pages.length} páginas)`, 'success');
     } catch (e) {
         console.error(e);
         showStatus('Error al importar: ' + e.message, 'error');
@@ -303,16 +376,26 @@ async function importChapter(files) {
 }
 
 async function extractZipToBlobs(file) {
+    // Verificar que JSZip esté disponible
+    if (typeof JSZip === 'undefined') {
+        throw new Error('JSZip no está cargado. Recarga la página.');
+    }
+
     const zip = new JSZip();
     const content = await zip.loadAsync(file);
     const entries = [];
     content.forEach((path, entry) => {
-        if (entry.dir || path.includes('__MACOSX')) return;
+        if (entry.dir || path.includes('__MACOSX') || path.startsWith('.')) return;
         const ext = path.split('.').pop().toLowerCase();
         if (['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp'].includes(ext)) {
             entries.push(entry);
         }
     });
+
+    if (entries.length === 0) {
+        throw new Error('El archivo ZIP no contiene imágenes');
+    }
+
     entries.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
     const result = [];
     for (const entry of entries) {
@@ -428,6 +511,23 @@ async function ghPutFile(path, base64Content, message, sha) {
         throw new Error(err.message || ('GitHub: ' + res.status));
     }
     return res.json();
+}
+
+async function ghDeleteFile(path, message) {
+    // Primero obtener el SHA del archivo
+    const file = await ghGetFile(path);
+    if (!file) return; // No existe, nada que borrar
+
+    const res = await fetch(`https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/${path}`, {
+        method: 'DELETE',
+        headers: ghHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ message, sha: file.sha })
+    });
+    if (!res.ok && res.status !== 404) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.message || ('GitHub: ' + res.status));
+    }
+    return res.json().catch(() => ({}));
 }
 
 async function updateIndexOnGitHub(mutator) {
